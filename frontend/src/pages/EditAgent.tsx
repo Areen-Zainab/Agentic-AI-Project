@@ -15,11 +15,21 @@ interface VersionRecord {
   description: string;
 }
 
+interface SceneOption {
+  scene_id: number;
+  location?: string;
+  characters?: string[];
+}
+
 interface EditRunResult {
   classified_intent?: EditIntent;
   execution_result?: Record<string, unknown>;
   response?: string;
   history?: VersionRecord[];
+  preview_video_url?: string;
+  before_version?: number;
+  after_version?: number;
+  selected_scene_id?: number | null;
 }
 
 const API = 'http://localhost:8000/api';
@@ -35,6 +45,12 @@ const EditAgent = () => {
   const [intent, setIntent] = useState<EditIntent | null>(null);
   const [result, setResult] = useState<EditRunResult | null>(null);
   const [history, setHistory] = useState<VersionRecord[]>([]);
+  const [scenes, setScenes] = useState<SceneOption[]>([]);
+  const [selectedSceneId, setSelectedSceneId] = useState<number | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [beforeVersion, setBeforeVersion] = useState<number | null>(null);
+  const [afterVersion, setAfterVersion] = useState<number | null>(null);
+  const [reviewMode, setReviewMode] = useState(false);
 
   const loadHistory = async () => {
     try {
@@ -48,8 +64,31 @@ const EditAgent = () => {
     }
   };
 
+  const loadScenes = async () => {
+    try {
+      const res = await fetch(`${API}/phase1/script`);
+      if (!res.ok) {
+        return;
+      }
+      const data = await res.json();
+      const loadedScenes = Array.isArray(data.data?.scenes) ? data.data.scenes : [];
+      const options = loadedScenes.map((scene: any) => ({
+        scene_id: scene.scene_id,
+        location: scene.location,
+        characters: scene.characters,
+      }));
+      setScenes(options);
+      if (options.length > 0 && selectedSceneId === null) {
+        setSelectedSceneId(options[0].scene_id);
+      }
+    } catch {
+      setScenes([]);
+    }
+  };
+
   useEffect(() => {
     void loadHistory();
+    void loadScenes();
   }, []);
 
   useEffect(() => {
@@ -75,12 +114,16 @@ const EditAgent = () => {
     setNotice(null);
     setIntent(null);
     setResult(null);
+    setPreviewUrl(null);
+    setBeforeVersion(null);
+    setAfterVersion(null);
+    setReviewMode(false);
 
     try {
       const res = await fetch(`${API}/edit/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: trimmed }),
+        body: JSON.stringify({ query: trimmed, scene_id: selectedSceneId }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -90,7 +133,11 @@ const EditAgent = () => {
       const runResult = (data.data || {}) as EditRunResult;
       setResult(runResult);
       setIntent(runResult.classified_intent || null);
-      setNotice(data.message || runResult.response || 'Edit executed successfully');
+      setPreviewUrl(runResult.preview_video_url ? `${API.replace('/api', '')}${runResult.preview_video_url}` : null);
+      setBeforeVersion(runResult.before_version ?? null);
+      setAfterVersion(runResult.after_version ?? null);
+      setReviewMode(true);
+      setNotice(data.message || runResult.response || 'Review the preview and accept or reject the changes.');
       await loadHistory();
     } catch (err: any) {
       setError(err.message || 'An error occurred while running the edit.');
@@ -99,10 +146,22 @@ const EditAgent = () => {
     }
   };
 
+  const handleAccept = async () => {
+    if (afterVersion === null) {
+      setNotice('Nothing to accept yet.');
+      return;
+    }
+    setReviewMode(false);
+    setNotice(`Changes accepted at version ${afterVersion}.`);
+    await loadHistory();
+  };
+
   const handleUndo = async (version: number) => {
     setUndoingVersion(version);
     setError(null);
     setNotice(null);
+    setReviewMode(false);
+    setPreviewUrl(null);
     try {
       const res = await fetch(`${API}/edit/undo/${version}`, { method: 'POST' });
       const data = await res.json();
@@ -266,6 +325,22 @@ const EditAgent = () => {
                   <div className="e-panel-sub">/api/edit/run</div>
                 </div>
                 <div className="e-panel-body">
+                          <div className="e-field" style={{ marginBottom: '14px' }}>
+                            <div className="e-field-lbl">Scene</div>
+                            <select
+                              className="e-textarea"
+                              style={{ minHeight: 'unset', padding: '12px 14px' }}
+                              value={selectedSceneId ?? ''}
+                              onChange={(event) => setSelectedSceneId(event.target.value ? Number(event.target.value) : null)}
+                            >
+                              <option value="">All scenes</option>
+                              {scenes.map((scene) => (
+                                <option key={scene.scene_id} value={scene.scene_id}>
+                                  Scene {scene.scene_id}{scene.location ? ` — ${scene.location}` : ''}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
                   <textarea
                     className="e-textarea"
                     value={query}
@@ -360,7 +435,14 @@ const EditAgent = () => {
                 <div className="e-card">
                   <div className="e-card-hd">Execution Preview</div>
                   <div className="e-card-body">
-                    {result?.response ? (
+                    {previewUrl ? (
+                      <video
+                        controls
+                        preload="metadata"
+                        src={previewUrl}
+                        style={{ width: '100%', borderRadius: '8px', border: '1px solid #1e1e22' }}
+                      />
+                    ) : result?.response ? (
                       <div className="e-field-val">{result.response}</div>
                     ) : (
                       <div className="e-field-val" style={{ color: '#6a6268' }}>
@@ -369,6 +451,21 @@ const EditAgent = () => {
                     )}
                     {result?.execution_result && (
                       <pre className="e-json">{JSON.stringify(result.execution_result, null, 2)}</pre>
+                    )}
+                    {reviewMode && (
+                      <div style={{ display: 'flex', gap: '12px', marginTop: '6px' }}>
+                        <button className="e-run-btn" style={{ marginTop: 0, flex: 1 }} onClick={handleAccept}>
+                          Accept Changes
+                        </button>
+                        <button
+                          className="e-revert-btn"
+                          style={{ flex: 1 }}
+                          onClick={() => beforeVersion !== null && handleUndo(beforeVersion)}
+                          disabled={beforeVersion === null}
+                        >
+                          Reject Changes
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>

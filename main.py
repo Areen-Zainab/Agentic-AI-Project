@@ -140,6 +140,9 @@ def _apply_snapshot_to_orchestrator(snapshot: dict) -> None:
     if snapshot.get("pipeline_status"):
         orchestrator.status = PipelineStatus.model_validate(snapshot["pipeline_status"])
 
+    if snapshot.get("selected_scene_id") is not None:
+        orchestrator.status.current_phase = f"scene:{snapshot['selected_scene_id']}"
+
 
 # ── Health Check ────────────────────────────────────────────────────────────
 
@@ -502,11 +505,12 @@ def get_phase3_outputs():
 def run_edit(request: EditRequest):
     """Classify and execute a natural-language edit request."""
     try:
-        current_state = _build_snapshot_state({"query": request.query})
+        current_state = _build_snapshot_state({"query": request.query, "selected_scene_id": request.scene_id, "scene_id": request.scene_id})
         result = edit_graph.invoke(
             {
                 "query": request.query,
                 "current_state": current_state,
+                "scene_id": request.scene_id,
                 "status": "pending",
             }
         )

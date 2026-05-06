@@ -129,6 +129,7 @@ class Phase3Request(BaseModel):
 class EditRequest(BaseModel):
     """Request body for triggering the Phase 5 edit workflow."""
     query: str
+    scene_id: Optional[int] = None
 
 
 # ── API Response Models ──────────────────────────────────────────────────────
