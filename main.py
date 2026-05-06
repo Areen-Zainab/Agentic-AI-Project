@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -533,6 +533,31 @@ def get_edit_history():
     }
 
 
+def _refresh_final_output_from_state(state_json: dict) -> None:
+    """Rebuild the final Phase 3 output after an edit is accepted."""
+    try:
+        from phase3_cutting_room.graph.state import initial_phase3_state
+        from phase3_cutting_room.graph.workflow import build_phase3_graph
+
+        scene_manifest = _load_json_file(Path("outputs/scene_manifest.json"))
+        classified_intent = state_json.get("classified_intent", {}) if isinstance(state_json, dict) else {}
+        params = classified_intent.get("parameters", {}) if isinstance(classified_intent, dict) else {}
+        transition_style = str(params.get("transition_style", "fade"))
+        add_subtitles = bool(params.get("add_subtitles", True))
+
+        phase3_state = initial_phase3_state(
+            scene_manifest=scene_manifest,
+            transition_style=transition_style,
+            add_subtitles=add_subtitles,
+        )
+        phase3_graph = build_phase3_graph()
+        phase3_result = phase3_graph.invoke(phase3_state)
+        if phase3_result.get("error"):
+            print(f"Phase 5 accept refresh failed: {phase3_result.get('error')}")
+    except Exception as exc:
+        print(f"Phase 5 accept refresh error: {exc}")
+
+
 @app.post("/api/edit/undo/{version}", tags=["Phase 5"])
 def undo_edit_version(version: int):
     """Restore assets and pipeline state from a previous snapshot."""
@@ -555,45 +580,20 @@ def undo_edit_version(version: int):
 
 
 @app.post("/api/edit/accept/{version}", tags=["Phase 5"])
-def accept_edit_version(version: int):
+def accept_edit_version(version: int, background_tasks: BackgroundTasks):
     """Commit an edit version as accepted in history."""
     try:
         record = edit_state_manager.get_version(version)
         _apply_snapshot_to_orchestrator(record.state_json)
-
-        # Recompose final output so accepted changes are reflected in playable final video.
-        from phase3_cutting_room.graph.state import initial_phase3_state
-        from phase3_cutting_room.graph.workflow import build_phase3_graph
-
-        scene_manifest = _load_json_file(Path("outputs/scene_manifest.json"))
-        classified_intent = record.state_json.get("classified_intent", {}) if isinstance(record.state_json, dict) else {}
-        params = classified_intent.get("parameters", {}) if isinstance(classified_intent, dict) else {}
-        transition_style = str(params.get("transition_style", "fade"))
-        add_subtitles = bool(params.get("add_subtitles", True))
-
-        phase3_state = initial_phase3_state(
-            scene_manifest=scene_manifest,
-            transition_style=transition_style,
-            add_subtitles=add_subtitles,
-        )
-        phase3_graph = build_phase3_graph()
-        phase3_result = phase3_graph.invoke(phase3_state)
-        if phase3_result.get("error"):
-            raise RuntimeError(f"Phase 3 recomposition failed: {phase3_result.get('error')}")
-
-        committed_version = edit_state_manager.snapshot(
-            state_json=record.state_json,
-            description=f"Accepted edit from version {version}",
-            asset_paths=_collect_snapshot_assets(),
-        )
+        background_tasks.add_task(_refresh_final_output_from_state, record.state_json)
         return {
             "success": True,
             "data": {
                 "accepted_version": version,
-                "committed_version": committed_version,
+                "committed_version": version,
                 "final_output_url": "/api/phase3/video",
             },
-            "message": f"Accepted edit version {version}",
+            "message": f"Accepted edit version {version}. Final output refresh started.",
         }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

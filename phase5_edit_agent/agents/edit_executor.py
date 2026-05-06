@@ -50,6 +50,45 @@ def _parse_scope_character(scope: str) -> str | None:
     return None
 
 
+def _resolve_selected_scene_id(
+    intent: EditIntent,
+    current_state: dict[str, Any],
+    scene_id: int | None,
+) -> int | None:
+    if scene_id is not None:
+        return int(scene_id)
+
+    scoped_scene_id = _parse_scope_scene(intent.scope)
+    if scoped_scene_id is not None:
+        return scoped_scene_id
+
+    selected_scene_id = current_state.get("selected_scene_id")
+    if selected_scene_id is not None:
+        return int(selected_scene_id)
+
+    current_scene_id = current_state.get("scene_id")
+    if current_scene_id is not None:
+        return int(current_scene_id)
+
+    phase2_output = current_state.get("phase2_output")
+    if isinstance(phase2_output, dict):
+        for scene in phase2_output.get("scenes", []) or []:
+            if isinstance(scene, dict) and not scene.get("error") and scene.get("scene_id") is not None:
+                return int(scene["scene_id"])
+
+    phase1_output = current_state.get("phase1_output")
+    if isinstance(phase1_output, dict):
+        script = phase1_output.get("script", {})
+        if isinstance(script, dict):
+            scenes = script.get("scenes", []) or []
+            if scenes:
+                first_scene = scenes[0]
+                if isinstance(first_scene, dict) and first_scene.get("scene_id") is not None:
+                    return int(first_scene["scene_id"])
+
+    return None
+
+
 def _collect_current_assets() -> list[str]:
     patterns = [
         "outputs_phase2/raw_scenes/**/*.mp4",
@@ -221,6 +260,45 @@ def _speed_adjust_scene(scene_id: int, speed: float) -> bool:
     return True
 
 
+def _parse_speed_factor(raw_speed: Any) -> float:
+    """Convert free-form speed hints into a safe ffmpeg factor."""
+    if raw_speed is None:
+        return 1.25
+    if isinstance(raw_speed, (int, float)):
+        return max(0.5, min(float(raw_speed), 2.0))
+
+    text = str(raw_speed).strip().lower()
+    if not text:
+        return 1.25
+    if "slow" in text:
+        return 0.8
+    if "fast" in text or "speed up" in text:
+        return 1.25
+
+    # Accept forms like "1.5x"
+    cleaned = text.replace("x", "").strip()
+    try:
+        return max(0.5, min(float(cleaned), 2.0))
+    except ValueError:
+        return 1.25
+
+
+def _is_speed_intent(intent: EditIntent) -> bool:
+    name = (intent.intent or "").lower()
+    if "speed" in name or "adjust_speed" in name:
+        return True
+    query_hint = str(intent.parameters.get("query", "")).lower()
+    return "speed up" in query_hint or "slow down" in query_hint
+
+
+def _default_speed_for_intent(intent: EditIntent) -> float:
+    name = (intent.intent or "").lower()
+    query_hint = str(intent.parameters.get("query", "")).lower()
+    if "slow" in name or "slow down" in query_hint:
+        return 0.8
+    return 1.25
+
+
 def _save_edit_clip(scene_id: int | None, source_path: Path | None, edit_version: int) -> str | None:
     if scene_id is None or source_path is None or not source_path.is_file():
         return None
@@ -313,7 +391,7 @@ def _rerun_phase3(intent: EditIntent, current_state: dict[str, Any]) -> dict[str
 def execute_edit(intent: EditIntent, current_state: dict[str, Any], state_mgr: StateManager | None = None) -> dict[str, Any]:
     """Execute an edit and store before/after snapshots."""
     manager = state_mgr or state_manager
-    scene_id = current_state.get("scene_id") or current_state.get("selected_scene_id")
+    scene_id = _resolve_selected_scene_id(intent, current_state, current_state.get("scene_id") or current_state.get("selected_scene_id"))
     before_assets = _collect_current_assets()
     original_scene_path = _phase2_scene_path(scene_id) if scene_id is not None else None
     before_version = manager.snapshot(
@@ -328,11 +406,14 @@ def execute_edit(intent: EditIntent, current_state: dict[str, Any], state_mgr: S
     elif intent.target in {"audio", "video_frame"}:
         updated = _rerun_phase2(intent, current_state, scene_id)
     elif intent.target == "video":
-        selected_scene_id = scene_id if scene_id is not None else _parse_scope_scene(intent.scope)
-        if intent.parameters.get("speed") and selected_scene_id is not None:
-            speed_applied = _speed_adjust_scene(int(selected_scene_id), float(intent.parameters.get("speed", 1.25)))
+        selected_scene_id = _resolve_selected_scene_id(intent, current_state, scene_id)
+        if _is_speed_intent(intent) and selected_scene_id is not None:
+            raw_speed = intent.parameters.get("speed", _default_speed_for_intent(intent))
+            speed_factor = _parse_speed_factor(raw_speed)
+            speed_applied = _speed_adjust_scene(int(selected_scene_id), speed_factor)
             updated = {
                 "speed_adjusted": speed_applied,
+                "speed_factor": speed_factor,
                 "phase2_output": get_orchestrator().get_phase2_output().model_dump() if get_orchestrator().get_phase2_output() else None,
             }
         else:
@@ -340,9 +421,9 @@ def execute_edit(intent: EditIntent, current_state: dict[str, Any], state_mgr: S
     else:
         raise ValueError(f"Unknown target: {intent.target}")
 
-    selected_scene_id = scene_id if scene_id is not None else _parse_scope_scene(intent.scope)
+    selected_scene_id = _resolve_selected_scene_id(intent, current_state, scene_id)
     preview_video_url = "/api/phase3/video" if intent.target == "video" else None
-    if intent.target == "video" and intent.parameters.get("speed") and selected_scene_id is not None:
+    if intent.target == "video" and _is_speed_intent(intent) and selected_scene_id is not None:
         preview_video_url = f"/api/phase2/video/{selected_scene_id}"
     if intent.target != "video" and selected_scene_id is not None:
         preview_video_url = f"/api/phase2/video/{selected_scene_id}"

@@ -72,3 +72,67 @@ def test_execute_edit_video_composition_params(monkeypatch):
     )
     result = execute_edit(intent, {"query": "cut + no subtitles"}, state_mgr=_StubStateMgr())
     assert result["preview_video_url"] == "/api/phase3/video"
+
+
+def test_execute_edit_adjust_speed_without_numeric_parameter(monkeypatch):
+    from phase5_edit_agent.agents import edit_executor as mod
+
+    monkeypatch.setattr(mod, "_collect_current_assets", lambda: [])
+    monkeypatch.setattr(mod, "_phase2_scene_path", lambda scene_id: None)
+    monkeypatch.setattr(mod, "_speed_adjust_scene", lambda scene_id, speed: True)
+
+    class _StubOrchestrator:
+        def get_phase2_output(self):
+            return None
+
+    monkeypatch.setattr(mod, "get_orchestrator", lambda: _StubOrchestrator())
+
+    intent = EditIntent(
+        intent="adjust_speed",
+        target="video",
+        scope="all",
+        parameters={"query": "speed up this scene"},
+        confidence=0.91,
+    )
+    result = execute_edit(
+        intent,
+        {"query": "speed up this scene", "selected_scene_id": 2},
+        state_mgr=_StubStateMgr(),
+    )
+    assert result["preview_video_url"] == "/api/phase2/video/2"
+
+
+def test_execute_edit_video_speed_falls_back_to_phase2_scene(monkeypatch):
+    from phase5_edit_agent.agents import edit_executor as mod
+
+    seen_scene_ids = []
+
+    monkeypatch.setattr(mod, "_collect_current_assets", lambda: [])
+    monkeypatch.setattr(mod, "_phase2_scene_path", lambda scene_id: None)
+    monkeypatch.setattr(mod, "_speed_adjust_scene", lambda scene_id, speed: seen_scene_ids.append((scene_id, speed)) or True)
+
+    class _StubOutput:
+        def model_dump(self):
+            return {"scenes": [{"scene_id": 3, "raw_mp4_path": "scene_03.mp4", "error": None}]}
+
+    class _StubOrchestrator:
+        def get_phase2_output(self):
+            return _StubOutput()
+
+    monkeypatch.setattr(mod, "get_orchestrator", lambda: _StubOrchestrator())
+
+    intent = EditIntent(
+        intent="adjust_speed",
+        target="video",
+        scope="all",
+        parameters={"speed": 1.25},
+        confidence=0.99,
+    )
+    result = execute_edit(
+        intent,
+        {"query": "adjust speed", "phase2_output": {"scenes": [{"scene_id": 3, "error": None}]}} ,
+        state_mgr=_StubStateMgr(),
+    )
+
+    assert seen_scene_ids == [(3, 1.25)]
+    assert result["selected_scene_id"] == 3
